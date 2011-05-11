@@ -123,9 +123,13 @@ class Dubby
     :host => 'localhost',
     :port => 11211,
   }.freeze
+  GET_RETRIES = 2
+  GET_RETRY_WAIT = 0.3
+  SET_RETRIES = 4
+  SET_RETRY_WAIT = 0.3
   COMMIT_RETRIES = 1
   COMMIT_RETRY_WAIT = 0.3
-  ROLLBACK_RETRIES = 10
+  ROLLBACK_RETRIES = 16
   ROLLBACK_RETRY_WAIT = 0.3
 
   def initialize(options={})
@@ -151,15 +155,15 @@ class Dubby
       hash = @uncommitted_record.dup
       source_hash = nil
       begin
-        source_hash = preserve(hash.keys)
+        source_hash = begin_transaction(hash.keys)
       rescue => error
         raise(TransactionError.new("failed to start transaction (#{error.message})"))
       end
       begin
-        commit(source_hash, hash)
+        commit_transaction(source_hash, hash)
         hash.each_key { |key| @uncommitted_record_lock.synchronize { @uncommitted_record.delete(key) } }
       rescue => error
-        rollback(source_hash)
+        rollback_transaction(source_hash)
         raise(TransactionError.new("failed to commit transaction (#{error.message})"))
       end
     }
@@ -174,15 +178,23 @@ class Dubby
     str = nil
     begin
       if use_cache
-        str = cache_connection.get(key)
+        begin
+          str = cache_connection.get(key)
+        rescue Connection::NetworkError => error
+          # just ignore. this is not a problem if we can read it from primary store.
+        end
       end
       if str
         if $DEBUG
           STDERR.puts("#{self.class}: reading #{str ? str.size : 0} byte(s) from #{key.dump} (cache)")
         end
       else
-        str = readable_connection.get(key)
-        cache_connection.set(key, str)
+        try_times(GET_RETRIES, GET_RETRY_WAIT) {
+          str = readable_connection.get(key)
+        }
+        try_times(SET_RETRIES, SET_RETRY_WAIT) {
+          cache_connection.set(key, str)
+        }
         if $DEBUG
           STDERR.puts("#{self.class}: reading #{str ? str.size : 0} byte(s) from #{key.dump}")
         end
@@ -208,8 +220,12 @@ class Dubby
       raise(error)
     end
     begin
-      writable_connection.set(key, str)
-      cache_connection.set(key, str)
+      try_times(SET_RETRIES, SET_RETRY_WAIT) {
+        writable_connection.set(key, str)
+      }
+      try_times(SET_RETRIES, SET_RETRY_WAIT) {
+        cache_connection.set(key, str)
+      }
       if $DEBUG
         STDERR.puts("#{self.class}: writing #{val ? val.size : 0} byte(s) to #{key.dump}")
       end
@@ -270,7 +286,7 @@ class Dubby
   end
 
   private
-  def preserve(keys)
+  def begin_transaction(keys)
     if $DEBUG
       STDERR.puts("#{self.class}: begin transaction for keys (#{keys.join(', ')})")
     end
@@ -278,7 +294,7 @@ class Dubby
     pairs.reduce({}) { |hash, (key, val)| hash.tap { |hash| hash[key] = val } }
   end
 
-  def commit(source_hash, hash)
+  def commit_transaction(source_hash, hash)
     if $DEBUG
       STDERR.puts("#{self.class}: commit transaction for keys (#{hash.keys.join(', ')})")
     end
@@ -294,14 +310,14 @@ class Dubby
             set!(key, val)
           }
         end
-      rescue TransactionError => error
+      rescue => error
         raise(TransactionError.new("commit failed for key #{key} (#{error.message})"))
       end
     }
     hash
   end
 
-  def rollback(hash)
+  def rollback_transaction(hash)
     if $DEBUG
       STDERR.puts("#{self.class}: rollback transaction for keys (#{hash.keys.join(', ')})")
     end
@@ -310,7 +326,7 @@ class Dubby
         try_times(ROLLBACK_RETRIES, ROLLBACK_RETRY_WAIT) {
           set!(key, val)
         }
-      rescue TransactionError => error
+      rescue => error
         raise(TransactionError.new("rollback failed for key #{key} (#{error.message})"))
       end
     }
@@ -327,7 +343,7 @@ class Dubby
         sleep(rand(retry_wait))
       end
     end
-    raise(TransactionError.new("retry count exceeded (max_retries = #{max_retries})"))
+    raise(RuntimeError.new("retry count exceeded (max_retries = #{max_retries})"))
   end
 
   def readable_connection()
@@ -386,24 +402,22 @@ class Dubby
     @cache_connection
   end
 
-  def serialize(obj)
+  def serializer()
     @serializer_lock.synchronize {
       if !@serializer
 ## FIXME: pluggable serializer does not implemented
         @serializer = YAMLSerializer.new
       end
     }
-    @serializer.serialize(obj)
+    @serializer
+  end
+
+  def serialize(obj)
+    serializer.serialize(obj)
   end
 
   def deserialize(str)
-    @serializer_lock.synchronize {
-      if !@serializer
-## FIXME: pluggable serializer does not implemented
-        @serializer = YAMLSerializer.new
-      end
-    }
-    @serializer.deserialize(str)
+    serializer.deserialize(str)
   end
 
 end
