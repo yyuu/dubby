@@ -48,18 +48,35 @@ class Dubby
       @port = port
       @connection_lock = Mutex.new
     end
-    def get(key)
-      begin
-        connection.get(key)
-      rescue MemCache::MemCacheError => error
-        raise(NetworkError.new(error.message))
+    if MemCache::VERSION.to_f < 1.7
+      def get(key)
+        begin
+          connection.get(key)
+        rescue MemCache::MemCacheError => error
+          raise(NetworkError.new(error.message))
+        end
       end
-    end
-    def set(key, val, exptime=CACHE_EXPIRE_TIME)
-      begin
-        connection.set(key, val, exptime)
-      rescue MemCache::MemCacheError => error
-        raise(NetworkError.new(error.message))
+      def set(key, val, exptime=CACHE_EXPIRE_TIME)
+        begin
+          connection.set(key, val, exptime)
+        rescue MemCache::MemCacheError => error
+          raise(NetworkError.new(error.message))
+        end
+      end
+    else
+      def get(key)
+        begin
+          connection.get(key, raw=true)
+        rescue MemCache::MemCacheError => error
+          raise(NetworkError.new(error.message))
+        end
+      end
+      def set(key, val, exptime=CACHE_EXPIRE_TIME)
+        begin
+          connection.set(key, val, exptime, raw=true)
+        rescue MemCache::MemCacheError => error
+          raise(NetworkError.new(error.message))
+        end
       end
     end
     def active?()
@@ -81,14 +98,6 @@ class Dubby
   end
 
   class Serializer
-    class DataError < StandardError
-    end
-    def serialize(*_)
-      raise(NotImplementedError.new('must be overrideen'))
-    end
-    def deserialize(*_)
-      raise(NotImplementedError.new('must be overrideen'))
-    end
   end
   class MarshalSerializer < Serializer
     def serialize(obj)
@@ -134,19 +143,35 @@ class Dubby
 
   def initialize(options={})
     @options = DEFAULT_OPTIONS.merge(options).freeze
-    @cache_connection = nil
-    @cache_connection_lock = Mutex.new
-    @readable_connection = nil
-    @readable_connection_lock = Mutex.new
-    @writable_connection = nil
-    @writable_connection_lock = Mutex.new
     @known_record = {}
     @known_record_lock = Mutex.new
     @uncommitted_record = {}
     @uncommitted_record_lock = Mutex.new
     @transaction_lock = Mutex.new
-    @serializer = nil
-    @serializer_lock = Mutex.new
+
+    if @options.has_key?(:readable_host) and @options.has_key?(:writable_host)
+      readable_host = @options[:readable_host]
+      readable_port = ( @options[:readable_port] or @options[:port] )
+      @readable_connection = MemcacheConnection.new(readable_host, readable_port)
+      writable_host = @options[:writable_host]
+      writable_port = ( @options[:writable_port] or @options[:port] )
+      @writable_connection = MemcacheConnection.new(writable_host, writable_port)
+    else
+      host = @options[:host]
+      port = @options[:port]
+      @readable_connection = @writable_connection = MemcacheConnection.new(host, port)
+    end
+
+## set up cache_connection only if host and port are specified
+    if @options.has_key?(:cache_host) and @options.has_key?(:cache_port)
+      cache_host = @options[:cache_host]
+      cache_port = @options[:cache_port]
+      @cache_connection = MemcacheConnection.new(cache_host, cache_port)
+    else
+      @cache_connection = DummyConnection.new
+    end
+
+    @serializer = YAMLSerializer.new
   end
 
   def save!()
@@ -347,77 +372,23 @@ class Dubby
   end
 
   def readable_connection()
-    @readable_connection_lock.synchronize {
-      if !@readable_connection or !@readable_connection.active?
-## FIXME: pluggable storage connection does not implemented
-        if @options.has_key?(:readable_host)
-          host = @options[:readable_host]
-          port = ( @options[:readable_port] or @options[:port] )
-          @readable_connection = MemcacheConnection.new(host, port)
-        elsif @writable_connection and @writable_connection.active?
-          @readable_connection = @writable_connection
-        else
-          host = @options[:host]
-          port = @options[:port]
-          @readable_connection = @writable_connection = MemcacheConnection.new(host, port)
-        end
-      end
-    }
     @readable_connection
   end
 
   def writable_connection()
-    @writable_connection_lock.synchronize {
-      if !@writable_connection or !@writable_connection.active?
-## FIXME: pluggable storage connection does not implemented
-        if @options.has_key?(:writable_host)
-          host = @options[:writable_host]
-          port = ( @options[:writable_port] or @options[:port] )
-          @writable_connection = MemcacheConnection.new(host, port)
-        elsif @readable_connection and @readable_connection.active?
-          @writable_connection = @readable_connection
-        else
-          host = ( @options[:writable_host] or @options[:host] )
-          port = ( @options[:writable_port] or @options[:port] )
-          @readable_connection = @writable_connection = MemcacheConnection.new(host, port)
-        end
-      end
-    }
     @writable_connection
   end
 
   def cache_connection()
-    @cache_connection_lock.synchronize {
-      if !@cache_connection or !@cache_connection.active?
-## FIXME: pluggable storage connection does not implemented
-        if @options.has_key?(:cache_host) and @options.has_key?(:cache_port)
-          host = @options[:cache_host]
-          port = @options[:cache_port]
-          @cache_connection = MemcacheConnection.new(host, port)
-        else
-          @cache_connection = DummyConnection.new()
-        end
-      end
-    }
     @cache_connection
   end
 
-  def serializer()
-    @serializer_lock.synchronize {
-      if !@serializer
-## FIXME: pluggable serializer does not implemented
-        @serializer = YAMLSerializer.new
-      end
-    }
-    @serializer
-  end
-
   def serialize(obj)
-    serializer.serialize(obj)
+    return @serializer.serialize(obj)
   end
 
   def deserialize(str)
-    serializer.deserialize(str)
+    return @serializer.deserialize(str)
   end
 
 end
