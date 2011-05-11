@@ -188,8 +188,7 @@ class Dubby
         end
       end
     rescue Connection::NetworkError => error
-      error.message = "failed to read value from #{key} (#{error.message})"
-      raise(error)
+      raise(TransactionError.new("failed to read value from #{key} (#{error.message})"))
     end
     val = nil
     begin
@@ -217,8 +216,7 @@ class Dubby
       append_key(key)
       val
     rescue Connection::NetworkError => error
-      error.message = "failed to write value to #{key} (#{error.message})"
-      raise(error)
+      raise(TransactionError.new("failed to write value to #{key} (#{error.message})"))
     end
   end
 
@@ -412,7 +410,10 @@ end
 
 if $0 == __FILE__
   $DEBUG = true
-  dubby = Dubby.new({:port => 1978, :cache_host => 'localhost', :cache_port => 11211})
+## use memcached as primary store
+  dubby = Dubby.new({:port => 11211})
+## use tokyotyrant as primary store and memcached as temporary cache
+# dubby = Dubby.new({:port => 1978, :cache_host => 'localhost', :cache_port => 11211})
   p(dubby)
   dubby.set("Test-#{$0}!!foo", "fOo valuE at #{Time.now}")
   dubby.set("tEst-#{$0}!!bar", "BaR valuE at #{Time.now}")
