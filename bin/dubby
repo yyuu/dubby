@@ -1,0 +1,380 @@
+#!/usr/bin/env ruby
+
+require 'dubby'
+require 'yaml'
+require 'optparse'
+require 'forwardable'
+require 'singleton'
+
+PROGRAM_NAME = File.basename($0)
+EXIT_SUCCESS = 0
+EXIT_FAILURE = 1
+
+Version = '0.0.1-SNAPSHOT'
+
+config = {}
+config[:bootstrap] = true
+config[:input_format] = nil
+config[:output_format] = :line
+
+[ '.', ENV['HOME'], '/etc', ].each { |dirname|
+  begin
+    dubby_conf = File.join(dirname, "dubby.conf")
+    loaded_config = YAML.load(File.read(dubby_conf))
+    config.update( loaded_config.keys.reduce({}) { |hash, key| hash.tap { |hash| hash[key.to_sym] = loaded_config[key] } } )
+    break
+  rescue => error
+    next
+  end
+}
+
+parser = OptionParser.new { |parse|
+  parse.on('-h HOSTNAME[:PORT]', '--host HOSTNAME[:PORT]') { |value|
+    host, port = value.split(':', 2)
+    config[:host] = host
+    config[:port] = port.to_i if port
+  }
+  parse.on('-r HOSTNAME[:PORT]', '--readonly-host MANDATORY') { |value|
+    host, port = value.split(':', 2)
+    config[:readonly_host] = host
+    config[:readonly_port] = port.to_i if port
+  }
+  parse.on('-c MANDATORY', '--cache-host MANDATORY') { |value|
+    host, port = value.split(':', 2)
+    config[:cache_host] = host
+    config[:cache_port] = port.to_i if port
+  }
+  parse.on('-i MANDATORY', '--initial-key MANDATORY') { |value|
+    config[:initial_key] = value
+  }
+  parse.on('-e MANDATORY', '--cache-expiry MANDATORY') { |value|
+    config[:cache_expiry] = value.to_i
+  }
+  parse.on('--bootstrap') {
+    config[:bootstrap] = true
+  }
+  parse.on('--skip-bootstrap') {
+    config[:bootstrap] = false
+    config[:manager] = 'simple'
+  }
+  parse.on('-v', '--verbose') {
+    config[:verbose] = true
+  }
+  parse.on('--dry-run') {
+    config[:dry_run] = true
+    config[:verbose] = true
+  }
+  parse.on('-d', '--debug') {
+    $DEBUG = true
+    config[:debug] = true
+  }
+}
+
+subparser = Hash.new { |_, key|
+  raise(OptionParser::InvalidOption.new("unknown subcommand: #{key}"))
+}
+
+subparser[:delete] = OptionParser.new { |parse|
+  parse.on('--yaml') {
+    config[:output_format] = :yaml
+  }
+  parse.on('-0', '--null') {
+    config[:output_format] = :null
+  }
+  parse.on('-1') {
+    config[:output_format] = :line
+  }
+}
+
+subparser[:get] = OptionParser.new { |parse|
+  parse.on('--yaml') {
+    config[:output_format] = :yaml
+  }
+  parse.on('-0', '--null') {
+    config[:output_format] = :null
+  }
+  parse.on('-1') {
+    config[:output_format] = :line
+  }
+}
+
+subparser[:list] = OptionParser.new { |parse|
+  parse.on('--yaml') {
+    config[:output_format] = :yaml
+  }
+  parse.on('-0', '--null') {
+    config[:output_format] = :null
+  }
+  parse.on('-1') {
+    config[:output_format] = :line
+  }
+  parse.on('--invert') {
+    config[:invert_match] = true
+  }
+}
+
+subparser[:pop] = OptionParser.new { |parse|
+  parse.on('--yaml') {
+    config[:input_format] = :yaml
+  }
+  parse.on('-0', '--null') {
+    config[:input_format] = :null
+  }
+  parse.on('-1') {
+    config[:input_format] = :line
+  }
+}
+
+subparser[:push] = OptionParser.new { |parse|
+  parse.on('--yaml') {
+    config[:input_format] = :yaml
+  }
+  parse.on('-0', '--null') {
+    config[:input_format] = :null
+  }
+  parse.on('-1') {
+    config[:input_format] = :line
+  }
+}
+
+subparser[:set] = OptionParser.new { |parse|
+  parse.on('--yaml') {
+    config[:input_format] = :yaml
+  }
+  parse.on('-0', '--null') {
+    config[:input_format] = :null
+  }
+  parse.on('-1') {
+    config[:input_format] = :line
+  }
+}
+
+begin
+  parser.order!(ARGV)
+rescue OptionParser::MissingArgument, OptionParser::InvalidOption => error
+  STDERR.puts("#{PROGRAM_NAME}: #{error.message}")
+  parser.order!(['--help'])
+  exit(EXIT_FAILURE)
+end
+
+begin
+  if ARGV.empty?
+    raise("no subcommand specified")
+  else
+    config[:subcommand] = ARGV.shift.to_sym
+  end
+rescue => error
+  STDERR.puts("#{PROGRAM_NAME}: you must specify subcommand: #{subparser.keys.join(', ')}")
+  exit(EXIT_FAILURE)
+end
+
+begin
+  subparser[config[:subcommand]].order!(ARGV)
+rescue OptionParser::MissingArgument, OptionParser::InvalidOption => error
+  STDERR.puts("#{PROGRAM_NAME}: #{error.message}")
+  subparser[config[:subcommand]].order!(['--help'])
+  exit(EXIT_FAILURE)
+end
+
+def prepare_output(obj, format=nil)
+  if format == :yaml
+    obj.to_yaml
+  else
+    if obj.is_a?(Array)
+      table = {
+        :line => "\n",
+        :null => "\0",
+        :space => " ", 
+      }
+      table.default = table[:line]
+      obj.join(table[format])
+    else
+      obj.to_s
+    end
+  end
+end
+
+def prepare_input(str, format=nil)
+  if format == :yaml
+    YAML.load(str)
+  else
+    table = {
+      :line => "\n",
+      :null => "\0",
+      :space => " ", 
+    }
+    table.default = table[:line]
+    str.split(table[format])
+  end
+end
+
+dubby = nil
+begin
+  dubby = Dubby.new(config)
+rescue => error
+  STDERR.puts("#{PROGRAM_NAME}: #{error.message}")
+  exit(EXIT_FAILURE)
+end
+
+case config[:subcommand]
+when :delete
+  begin
+    if ARGV.empty?
+      keys = prepare_input(STDIN.read, config[:input_format])
+    else
+      keys = ARGV
+    end
+    keys.each { |key|
+      if config[:verbose]
+        STDERR.puts("deleting #{key}...")
+      end
+      unless config[:dry_run]
+        dubby.delete(key)
+      end
+    }
+    if config[:verbose]
+      STDERR.puts("committed.")
+    end
+    unless config[:dry_run]
+      dubby.save!
+    end
+  rescue => error
+    raise(error)
+  end
+
+when :get
+  begin
+    keys = ARGV
+    vals = keys.map { |key| dubby.get(key) }
+    if keys.size > 1
+      hash = keys.zip(vals).reduce({}) { |hash, (key, val)| hash.tap { |hash| hash[key] = val } }
+      str = prepare_output(hash, config[:output_format])
+    else
+      str = prepare_output(vals.first, config[:output_format])
+    end
+    STDOUT.__send__(config[:output_format] == :null ? :write : :puts, str)
+  rescue => error
+    raise(error)
+  end
+
+when :list
+  patterns = ARGV.map { |pattern| Regexp.new(pattern) }
+  patterns = [ // ] if patterns.empty?
+  begin
+    keys = dubby.keys
+## standard match produces union set of patterns.
+## invert match produces product set of patterns.
+    keys = patterns.map { |pattern|
+      keys.reject { |key|
+        if config[:invert_match]
+          pattern === key
+        else
+          !(pattern === key)
+        end
+      }
+    }.reduce([]) { |result, keys|
+      if config[:invert_match]
+        result.size == 0 ? keys : (result & keys)
+      else
+        result.size == 0 ? keys : (result | keys)
+      end
+    }
+    str = prepare_output(keys, config[:output_format])
+    STDOUT.__send__(config[:output_format] == :null ? :write : :puts, str)
+  rescue => error
+    raise(error)
+  end
+
+when :pop
+  if key = ARGV.shift
+    begin
+      if ARGV.empty?
+        vals = prepare_input(STDIN.read, config[:input_format])
+      else
+        vals = ARGV
+      end
+      vals.each { |val|
+        if config[:verbose]
+          STDERR.puts("removing #{val.inspect} from #{key}...")
+        end
+        unless config[:dry_run]
+          dubby.pop(key, val)
+        end
+      }
+      if config[:verbose]
+        STDERR.puts("committed.")
+      end
+      unless config[:dry_run]
+        dubby.save!
+      end
+    rescue => error
+      raise(error)
+    end
+  end
+
+when :push
+  if key = ARGV.shift
+    begin
+      if ARGV.empty?
+        vals = prepare_input(STDIN.read, config[:input_format])
+      else
+        vals = ARGV
+      end
+      vals.each { |val|
+        if config[:verbose]
+          STDERR.puts("adding #{val.inspect} to #{key}...")
+        end
+        unless config[:dry_run]
+          dubby.push(key, val)
+        end
+      }
+      if config[:verbose]
+        STDERR.puts("committed.")
+      end
+      unless config[:dry_run]
+        dubby.save!
+      end
+    rescue => error
+      raise(error)
+    end
+  end
+
+when :set
+  if key = ARGV.shift
+    begin
+      if ARGV.empty?
+        vals = prepare_input(STDIN.read, config[:input_format])
+      else
+        vals = ARGV
+      end
+      val = vals.first
+      if config[:verbose]
+        STDERR.puts("setting #{val.inspect} to #{key}...")
+      end
+      unless config[:dry_run]
+        dubby.set!(key, val)
+      end
+    rescue => error
+      raise(error)
+    end
+  else
+    begin
+      hash = prepare_input(STDIN.read, config[:input_format])
+      if hash.is_a?(Hash)
+        hash.each { |key, val|
+          if config[:verbose]
+            STDERR.puts("setting #{val.inspect} to #{key}...")
+          end
+          unless config[:dry_run]
+            dubby.set!(key, val)
+          end
+        }
+      end
+    rescue => error
+      raise(error)
+    end
+  end
+
+end
+
+# vim:set ft=ruby :
