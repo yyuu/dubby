@@ -15,7 +15,7 @@ class DubbyStore
     class NetworkError < StandardError
     end
     def initialize()
-      @host = @port = @connection = nil
+      @connection = nil
     end
     def delete()
       raise(NotImplementedError.new('should be overridden'))
@@ -117,6 +117,24 @@ class DubbyStore
     end
   end
 
+  class HashConnection
+    def initialize()
+      @hash = {}
+    end
+    def delete(key)
+      @hash.delete(key)
+    end
+    def get(key)
+      @hash[key]
+    end
+    def set(key, val)
+      @hash[key] = val
+    end
+    def active?()
+      true
+    end
+  end
+
   class Serializer
   end
 
@@ -177,6 +195,9 @@ class DubbyStore
       when /dummy/i
         @readonly_connection = DummyConnection.new
         @writable_connection = DummyConnection.new
+      when /hash/i
+        @readonly_connection = HashConnection.new
+        @writable_connection = HashConnection.new
       else
         @readonly_connection = MemcacheConnection.new(readonly_host, readonly_port)
         @writable_connection = MemcacheConnection.new(writable_host, writable_port)
@@ -187,6 +208,8 @@ class DubbyStore
       case @options[:protocol]
       when /dummy/i
         @readonly_connection = @writable_connection = DummyConnection.new
+      when /hash/i
+        @readonly_connection = @writable_connection = HashConnection.new
       else
         @readonly_connection = @writable_connection = MemcacheConnection.new(host, port)
       end
@@ -199,6 +222,8 @@ class DubbyStore
       case @options[:cache_protocol]
       when /dummy/i
         @cache_connection = DummyConnection.new
+      when /hash/i
+        @cache_connection = HashConnection.new
       else
         @cache_connection = MemcacheConnection.new(cache_host, cache_port, @options[:cache_expiry])
       end
@@ -282,7 +307,7 @@ class DubbyStore
 
   def delete!(key)
     begin
-      deregister(key)
+      delete(key)
       _delete_record!(key)
     rescue => error
       raise(TransactionError.new("failed to delete key #{key} (#{error.message})"))
