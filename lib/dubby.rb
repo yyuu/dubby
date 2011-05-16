@@ -550,6 +550,16 @@ end
 
 class DubbyManager
   extend Forwardable
+
+  class Error < StandardError
+  end
+  class KeyError < Error
+  end
+  class InvalidKeyError < KeyError
+  end
+  class TopologyError < Error
+  end
+
   def initialize(store, options={})
     @store = store
     @options = options
@@ -603,7 +613,7 @@ class DubbyTier1Manager < DubbyManager
       @store.set(@initial_key, @known_keys)
       @store.delete(key)
     else
-      raise("unknown key: #{key}")
+      raise(DubbyManager::InvalidKeyError.new("unknown key: #{key}"))
     end
   end
   def delete!(key)
@@ -612,14 +622,14 @@ class DubbyTier1Manager < DubbyManager
       @store.set!(@initial_key, @known_keys)
       @store.delete!(key)
     else
-      raise("unknown key: #{key}")
+      raise(DubbyManager::InvalidKeyError.new("unknown key: #{key}"))
     end
   end
   def get(key)
     if @known_keys.include?(key) or key == @initial_key
       @store.get(key)
     else
-      raise("unknown key: #{key}")
+      raise(DubbyManager::InvalidKeyError.new("unknown key: #{key}"))
     end
   end
   def pop(key, val)
@@ -678,7 +688,7 @@ class DubbyTier1Manager < DubbyManager
       @known_keys = []
     end
     if @known_keys.include?(@initial_key)
-      raise("loop detected in #{@initial_key}")
+      raise(DubbyManager::TopologyError.new("loop detected in #{@initial_key}"))
     end
     @store.register(*@known_keys)
   end
