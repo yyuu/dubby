@@ -29,6 +29,9 @@ class DubbyStore
     def active?()
       raise(NotImplementedError.new('should be overridden'))
     end
+    def exist?()
+      raise(NotImplementedError.new('should be overridden'))
+    end
     private
     def connection()
       @connection
@@ -47,6 +50,9 @@ class DubbyStore
     end
     def active?()
       true
+    end
+    def exist?()
+      false
     end
   end
 
@@ -108,6 +114,13 @@ class DubbyStore
         end
       end
     end
+    def exist?(key)
+      begin
+        get(key) != nil
+      rescue MemCache::MemCacheError => error
+        false
+      end
+    end
     def active?()
       connection.active?
     end
@@ -129,6 +142,9 @@ class DubbyStore
     end
     def set(key, val)
       @hash[key] = val
+    end
+    def exists?(key)
+      @hash.include?(key)
     end
     def active?()
       true
@@ -319,6 +335,10 @@ class DubbyStore
       @uncommitted_record[key] = nil # tombstoned
     }
     deregister(key)
+  end
+
+  def exist?(key)
+    @uncommitted_record.include?(key) or _exist_record?(key)
   end
 
   def to_hash()
@@ -546,9 +566,13 @@ class DubbyStore
       end
     }
   end
+
+  def _exist_record?(key)
+    readonly_connection.exist?(key)
+  end
 end
 
-class DubbyManager
+class DubbyStoreManager
   extend Forwardable
 
   class Error < StandardError
@@ -586,6 +610,12 @@ class DubbyManager
   def delete!(key)
     raise(NotImplementedError.new('should be overridden'))
   end
+  def exist?(key)
+    raise(NotImplementedError.new('should be overridden'))
+  end
+  def children()
+    raise(NotImplementedError.new('not yet implemented'))
+  end
   def_delegator :@store, :keys
   def_delegator :@store, :save!
   def_delegator :@store, :to_hash
@@ -594,7 +624,7 @@ class DubbyManager
   end
 end
 
-class DubbySimpleManager < DubbyManager
+class DubbySimpleStoreManager < DubbyStoreManager
   extend Forwardable
   def_delegator :@store, :delete
   def_delegator :@store, :delete!
@@ -603,9 +633,10 @@ class DubbySimpleManager < DubbyManager
   def_delegator :@store, :push
   def_delegator :@store, :set
   def_delegator :@store, :set!
+  def_delegator :@store, :exist?
 end
 
-class DubbyTier1Manager < DubbyManager
+class DubbyTier1StoreManager < DubbyStoreManager
   INITIAL_KEY = "dubby_initial_key"
   def delete(key)
     if @known_keys.include?(key) or key == @initial_key
@@ -613,7 +644,7 @@ class DubbyTier1Manager < DubbyManager
       @store.set(@initial_key, @known_keys)
       @store.delete(key)
     else
-      raise(DubbyManager::InvalidKeyError.new("unknown key: #{key}"))
+      raise(DubbyStoreManager::InvalidKeyError.new("unknown key: #{key}"))
     end
   end
   def delete!(key)
@@ -622,14 +653,14 @@ class DubbyTier1Manager < DubbyManager
       @store.set!(@initial_key, @known_keys)
       @store.delete!(key)
     else
-      raise(DubbyManager::InvalidKeyError.new("unknown key: #{key}"))
+      raise(DubbyStoreManager::InvalidKeyError.new("unknown key: #{key}"))
     end
   end
   def get(key)
     if @known_keys.include?(key) or key == @initial_key
       @store.get(key)
     else
-      raise(DubbyManager::InvalidKeyError.new("unknown key: #{key}"))
+      raise(DubbyStoreManager::InvalidKeyError.new("unknown key: #{key}"))
     end
   end
   def pop(key, val)
@@ -680,6 +711,9 @@ class DubbyTier1Manager < DubbyManager
       @store.set!(key, val)
     end
   end
+  def exist?(key)
+    @known_keys.include?(key)
+  end
   private
   def bootstrap(options={})
     @initial_key = ( options[:initial_key] or INITIAL_KEY )
@@ -688,17 +722,17 @@ class DubbyTier1Manager < DubbyManager
       @known_keys = []
     end
     if @known_keys.include?(@initial_key)
-      raise(DubbyManager::TopologyError.new("loop detected in #{@initial_key}"))
+      raise(DubbyStoreManager::TopologyError.new("loop detected in #{@initial_key}"))
     end
     @store.register(*@known_keys)
   end
 end
 
-class DubbyListManager < DubbyManager
+class DubbyListStoreManager < DubbyStoreManager
   INITIAL_KEY = 'dubby_initial_key'
 end
 
-class DubbyTreeManager < DubbyManager
+class DubbyTreeStoreManager < DubbyStoreManager
   INITIAL_KEY = 'dubby_initial_key'
 end
 
@@ -706,22 +740,23 @@ class Dubby
   extend Forwardable
   def initialize(options={})
     @store = DubbyStore.new(options)
-    case options[:manager]
+    case ( options[:store_manager] or options[:manager] )
     when /simple/i
-      @manager = DubbySimpleManager.new(@store, options)
+      @store_manager = DubbySimpleStoreManager.new(@store, options)
     else
-      @manager = DubbyTier1Manager.new(@store, options)
+      @store_manager = DubbyTier1StoreManager.new(@store, options)
     end
   end
-  def_delegator :@manager, :delete
-  def_delegator :@manager, :delete!
-  def_delegator :@manager, :get
-  def_delegator :@manager, :keys
-  def_delegator :@manager, :pop
-  def_delegator :@manager, :push
-  def_delegator :@manager, :save!
-  def_delegator :@manager, :set
-  def_delegator :@manager, :set!
+  def_delegator :@store_manager, :delete
+  def_delegator :@store_manager, :delete!
+  def_delegator :@store_manager, :get
+  def_delegator :@store_manager, :keys
+  def_delegator :@store_manager, :pop
+  def_delegator :@store_manager, :push
+  def_delegator :@store_manager, :save!
+  def_delegator :@store_manager, :set
+  def_delegator :@store_manager, :set!
+  def_delegator :@store_manager, :exist?
 
   def_delegator :@store, :inspect
   def_delegator :@store, :to_s
@@ -739,7 +774,7 @@ if $0 == __FILE__
     :initial_key => 'dubby_initial_key',
 #   :protocol => 'memcache',
 #   :cache_protocol => 'memcache',
-#   :manager => 'tier1',
+#   :store_manager => 'tier1',
 #   :serializer => 'yaml',
   }
   dubby = Dubby.new(options)
