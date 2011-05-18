@@ -180,17 +180,13 @@ def prepare_output(obj, format=nil)
   if format == :yaml
     obj.to_yaml
   else
-    if obj.is_a?(Array)
-      table = {
-        :line => "\n",
-        :null => "\0",
-        :space => " ", 
-      }
-      table.default = table[:line]
-      obj.join(table[format])
-    else
-      obj.to_s
-    end
+    table = {
+      :line => "\n",
+      :null => "\0",
+      :space => " ", 
+    }
+    table.default = table[:line]
+    obj.to_a.join(table[format])
   end
 end
 
@@ -244,7 +240,11 @@ when :delete
 
 when :get
   begin
-    keys = ARGV
+    if ARGV.empty?
+      keys = dubby.keys
+    else
+      keys = ARGV
+    end
     vals = keys.map { |key| dubby.get(key) }
     if keys.size > 1
       hash = keys.zip(vals).reduce({}) { |hash, (key, val)| hash.tap { |hash| hash[key] = val } }

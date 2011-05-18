@@ -13,7 +13,7 @@ def load_dubby()
     begin
       if value = dubby.get(key)
         symbol = "dubby_#{key.gsub(/\-|\/|:/, '_')}".to_sym
-        Facter.add(symbol) { setcode { value } }
+        Facter.add(symbol) { setcode { value.to_a.join(',') } }
       end
     rescue => error
       STDERR.puts("failed to load key from dubby: #{key} (#{error.message})")
