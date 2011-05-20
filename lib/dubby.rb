@@ -130,7 +130,7 @@ class DubbyStore
     end
   end
 
-  class HashConnection
+  class HashConnection < Connection
     def initialize()
       @hash = {}
     end
