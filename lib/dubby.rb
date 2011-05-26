@@ -476,19 +476,6 @@ class DubbyStore
   end
 
   def _get_record(key)
-## use cache as first resolver, send request to primary if key is not cached.
-#   begin
-#     _get_cached_record(key)
-#   rescue => error
-#     _get_primary_record(key).tap { |val|
-#       begin
-#         _set_cached_record(key, val) if val
-#       rescue => error
-#         # nop
-#       end
-#     }
-#   end
-
 ## use primary as first resolver, send request to secondary only if primary is down.
     begin
       _get_primary_record(key).tap { |val|
@@ -520,9 +507,13 @@ class DubbyStore
   end
 
   def _set_record!(key, val)
-## write through
-    _set_primary_record!(key, val)
-    _set_cached_record!(key, val)
+    _set_primary_record!(key, val).tap { |val|
+      begin
+        _set_cached_record!(key, val)
+      rescue => error
+        # nop
+      end
+    }
   end
 
   def _set_primary_record!(key, val)
